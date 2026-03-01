@@ -13,13 +13,23 @@ class Data:
                 if i not in self.train_relations] + [i for i in self.test_relations \
                 if i not in self.train_relations]
 
+
     def load_data(self, data_dir, data_type="train", reverse=False):
-        with open("%s%s.txt" % (data_dir, data_type), "r") as f:
-            data = f.read().strip().split("\n")
-            data = [i.split() for i in data]
-            if reverse:
-                data += [[i[2], i[1]+"_reverse", i[0]] for i in data]
-        return data
+            with open("%s%s.txt" % (data_dir, data_type), "r") as f:
+                data = f.read().strip().split("\n")
+                
+                # MODIFICACIÓN 1: Ignora líneas en blanco
+                # El "if i" asegura que solo procesemos líneas que no estén vacías.
+                data = [i.split() for i in data if i]
+                
+                if reverse:
+                    # MODIFICACIÓN 2: Asegura que la tripleta tenga 3 elementos
+                    # El "if len(i) == 3" evita errores con líneas malformadas.
+                    data += [[i[2], i[1]+"_reverse", i[0]] for i in data if len(i) == 3]
+            return data
+
+
+
 
     def get_relations(self, data):
         relations = sorted(list(set([d[1] for d in data])))

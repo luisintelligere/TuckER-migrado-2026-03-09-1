@@ -1,0 +1,204 @@
+from load_data import Data
+import numpy as np
+import torch
+import time
+from collections import defaultdict
+from model import *
+from torch.optim.lr_scheduler import ExponentialLR
+import argparse
+import pandas as pd
+import os
+
+class Experiment:
+
+    def __init__(self, learning_rate=0.0005, ent_vec_dim=200, rel_vec_dim=200, 
+                 num_iterations=500, batch_size=128, decay_rate=0., cuda=False, 
+                 input_dropout=0.3, hidden_dropout1=0.4, hidden_dropout2=0.5,
+                 label_smoothing=0., output_dir='results'):
+        self.learning_rate = learning_rate
+        self.ent_vec_dim = ent_vec_dim
+        self.rel_vec_dim = rel_vec_dim
+        self.num_iterations = num_iterations
+        self.batch_size = batch_size
+        self.decay_rate = decay_rate
+        self.label_smoothing = label_smoothing
+        self.cuda = cuda
+        self.output_dir = output_dir
+        self.kwargs = {"input_dropout": input_dropout, "hidden_dropout1": hidden_dropout1,
+                       "hidden_dropout2": hidden_dropout2}
+        self.device = torch.device("cuda" if (cuda and torch.cuda.is_available()) else "cpu")
+        self.history = []
+
+    def get_data_idxs(self, data):
+        data_idxs = [(self.entity_idxs[data[i][0]], self.relation_idxs[data[i][1]], self.entity_idxs[data[i][2]]) for i in range(len(data))]
+        return data_idxs
+    
+    def get_er_vocab(self, data):
+        er_vocab = defaultdict(list)
+        for triple in data: er_vocab[(triple[0], triple[1])].append(triple[2])
+        return er_vocab
+
+    def get_batch(self, er_vocab, er_vocab_pairs, idx):
+        batch = er_vocab_pairs[idx:idx+self.batch_size]
+        targets = np.zeros((len(batch), len(d.entities)))
+        for i, pair in enumerate(batch): targets[i, er_vocab[pair]] = 1.
+        return np.array(batch), torch.FloatTensor(targets).to(self.device)
+    
+    def evaluate(self, model, data):
+        hits = [[] for _ in range(10)]; ranks = []
+        test_data_idxs = self.get_data_idxs(data)
+        er_vocab = self.get_er_vocab(self.get_data_idxs(d.data))
+        if not test_data_idxs:
+            return {'hits@10': np.nan, 'hits@3': np.nan, 'hits@1': np.nan, 'mr': np.nan, 'mrr': np.nan}
+        
+        print("Number of data points: %d" % len(test_data_idxs))
+        for i in range(0, len(test_data_idxs), self.batch_size):
+            data_batch, _ = self.get_batch(er_vocab, test_data_idxs, i)
+            e1_idx = torch.tensor(data_batch[:,0]).to(self.device)
+            r_idx = torch.tensor(data_batch[:,1]).to(self.device)
+            e2_idx = torch.tensor(data_batch[:,2]).to(self.device)
+            predictions = model.forward(e1_idx, r_idx)
+            for j in range(data_batch.shape[0]):
+                filt = er_vocab[(data_batch[j][0], data_batch[j][1])]
+                target_value = predictions[j,e2_idx[j]].item()
+                if filt: predictions[j, filt] = 0.0
+                predictions[j, e2_idx[j]] = target_value
+            sort_values, sort_idxs = torch.sort(predictions, dim=1, descending=True)
+            sort_idxs = sort_idxs.cpu().numpy()
+            for j in range(data_batch.shape[0]):
+                rank = np.where(sort_idxs[j]==e2_idx[j].item())[0][0]
+                ranks.append(rank+1)
+                for hits_level in range(10):
+                    if rank <= hits_level: hits[hits_level].append(1.0)
+        
+        metrics = {'hits@10': np.mean(hits[9]), 'hits@3': np.mean(hits[2]), 'hits@1': np.mean(hits[0]), 'mr': np.mean(ranks), 'mrr': np.mean(1./np.array(ranks))}
+        print('Hits @10: {0}'.format(metrics['hits@10'])); print('Hits @3: {0}'.format(metrics['hits@3'])); print('Hits @1: {0}'.format(metrics['hits@1'])); print('Mean rank: {0}'.format(metrics['mr'])); print('Mean reciprocal rank: {0}'.format(metrics['mrr']))
+        return metrics
+
+    def train_and_eval(self, init_embeddings_path=None, init_vocab_path=None):
+        print("Training the TuckER model...")
+        self.entity_idxs = {d.entities[i]:i for i in range(len(d.entities))}
+        self.relation_idxs = {d.relations[i]:i for i in range(len(d.relations))}
+        train_data_idxs = self.get_data_idxs(d.train_data)
+        print("Number of training data points: %d" % len(train_data_idxs))
+        
+        model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model.to(self.device)
+        
+        # --- LÓGICA DE INICIALIZACIÓN COMBINADA ---
+        if init_embeddings_path and init_vocab_path:
+            print(f"Cargando embeddings iniciales desde {init_embeddings_path}...")
+            init_embeddings = np.load(init_embeddings_path)
+            with open(init_vocab_path, 'r') as f:
+                init_vocab = json.load(f)
+            
+            init_entity_to_idx = {entity: i for i, entity in enumerate(init_vocab)}
+            
+            new_embeddings = torch.randn_like(model.E.weight)
+            for entity, idx_actual in self.entity_idxs.items():
+                if entity in init_entity_to_idx:
+                    idx_inicial = init_entity_to_idx[entity]
+                    if idx_inicial < len(init_embeddings):
+                        new_embeddings[idx_actual, :] = torch.from_numpy(init_embeddings[idx_inicial, :])
+            
+            model.E.weight.data.copy_(new_embeddings)
+            print("Embeddings iniciales inyectados en el modelo.")
+        else:
+            model.init()
+        # --- FIN DE LA LÓGICA DE INICIALIZACIÓN ---
+
+        opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        if self.decay_rate and self.decay_rate != 1.0:
+            scheduler = ExponentialLR(opt, self.decay_rate)
+        
+        er_vocab = self.get_er_vocab(train_data_idxs)
+        er_vocab_pairs = list(er_vocab.keys())
+        
+        print("Starting training...")
+        for it in range(1, self.num_iterations+1):
+            start_train = time.time()
+            model.train()    
+            losses = []
+            np.random.shuffle(er_vocab_pairs)
+            for j in range(0, len(er_vocab_pairs), self.batch_size):
+                data_batch, targets = self.get_batch(er_vocab, er_vocab_pairs, j)
+                opt.zero_grad()
+                e1_idx = torch.tensor(data_batch[:,0]).to(self.device)
+                r_idx = torch.tensor(data_batch[:,1]).to(self.device)
+                predictions = model.forward(e1_idx, r_idx)
+                if self.label_smoothing:
+                    targets = ((1.0-self.label_smoothing)*targets) + (1.0/targets.size(1))           
+                loss = model.loss(predictions, targets)
+                loss.backward(); opt.step()
+                losses.append(loss.item())
+            if self.decay_rate and self.decay_rate != 1.0:
+                scheduler.step()
+            
+            epoch_results = {'epoch': it, 'loss': np.mean(losses)}
+            print(f"\nEpoch: {it}, Time: {time.time()-start_train:.4f}, Loss: {epoch_results['loss']:.4f}")
+            
+            # --- SECCIÓN DE EVALUACIÓN RESTAURADA ---
+            model.eval()
+            with torch.no_grad():
+                print("Validation:")
+                val_metrics = self.evaluate(model, d.valid_data)
+                for key, value in val_metrics.items():
+                    epoch_results['val_' + key] = value
+                
+                if not it%2:
+                    print("Test:")
+                    start_test = time.time()
+                    test_metrics = self.evaluate(model, d.test_data)
+                    for key, value in test_metrics.items():
+                        epoch_results['test_' + key] = value
+                    print(f"Test Time: {time.time()-start_test:.4f}")
+            self.history.append(epoch_results)
+            # --- FIN DE LA SECCIÓN RESTAURADA ---
+        
+        print("\nEntrenamiento finalizado. Guardando el modelo y las métricas...")
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        model_path = os.path.join(self.output_dir, f"{os.path.basename(self.output_dir)}.pt")
+        metrics_path = os.path.join(self.output_dir, "training_metrics.csv")
+        
+        torch.save(model.state_dict(), model_path)
+        print(f"Modelo guardado exitosamente en '{model_path}'")
+        
+        history_df = pd.DataFrame(self.history)
+        history_df.to_csv(metrics_path, index=False)
+        print(f"Métricas guardadas exitosamente en '{metrics_path}'")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    # ... (argumentos anteriores)
+    parser.add_argument("--dataset", type=str, default="FB15k-237", nargs="?")
+    parser.add_argument("--num_iterations", type=int, default=500, nargs="?")
+    parser.add_argument("--batch_size", type=int, default=128, nargs="?")
+    parser.add_argument("--lr", type=float, default=0.0005, nargs="?")
+    parser.add_argument("--dr", type=float, default=1.0, nargs="?")
+    parser.add_argument("--edim", type=int, default=200, nargs="?")
+    parser.add_argument("--rdim", type=int, default=200, nargs="?")
+    parser.add_argument("--cuda", type=bool, default=True, nargs="?")
+    parser.add_argument("--input_dropout", type=float, default=0.3, nargs="?")
+    parser.add_argument("--hidden_dropout1", type=float, default=0.4, nargs="?")
+    parser.add_argument("--hidden_dropout2", type=float, default=0.5, nargs="?")
+    parser.add_argument("--label_smoothing", type=float, default=0.1, nargs="?")
+    parser.add_argument("--output_prefix", type=str, default="my_experiment", nargs="?")
+    
+    # --- Nuevos argumentos para inicialización ---
+    parser.add_argument("--init_embeddings", type=str, default=None)
+    parser.add_argument("--init_vocab", type=str, default=None)
+    
+    args = parser.parse_args()
+    data_dir = f"data/{args.dataset}/"
+    output_dir = os.path.join("results", args.output_prefix)
+
+    torch.backends.cudnn.deterministic = True 
+    seed = 20
+    np.random.seed(seed); torch.manual_seed(seed)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed) 
+    
+    d = Data(data_dir=data_dir, reverse=True)
+    
+    experiment = Experiment(..., output_dir=output_dir)
+    experiment.train_and_eval(init_embeddings_path=args.init_embeddings, init_vocab_path=args.init_vocab)

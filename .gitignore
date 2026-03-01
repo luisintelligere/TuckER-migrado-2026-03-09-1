@@ -1,0 +1,34 @@
+# IDE / editor
+.vs/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+
+# Jupyter temp files
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+Untitled*.ipynb
+*-checkpoint*.ipynb
+test.ipynb
+
+# Datasets and generated artifacts
+data/**
+processed/
+results/
+exp_fontbona/
+reintegrando/
+metricas_*.csv
+metricas_experimento_fontbona_nuevas_metricas/
+graficos_metricas/
+figs_tsne_tucker_vs_pred*/
+
+# Model / arrays
+*.pt
+*.npy
+
+# Generated figures and docs
+*.png
+*.jpg
+*.jpeg
+*.pdf
