@@ -1,0 +1,70 @@
+﻿Resumen del push organizado
+Fecha: 2026-03-09 23:32:10
+Rama: chore/push-razonable-2026-03-01
+Commit: 1d562a8
+
+Archivos incluidos (estado y ruta):
+A	.gitignore
+A	analyze_distributions.py
+A	correr.bat
+A	correr_earlystopping.bat
+A	correr_earlystopping_multirelacional.bat
+A	"correr_earlystopping_multirelacional_multiplesa\303\261os.bat"
+A	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim copy.bat"
+A	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim.bat"
+A	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim_2.bat"
+A	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim_soft.bat"
+A	"correr_earlystopping_multirelacional_train_all_multia\303\261os.bat"
+A	"correr_earlystopping_multirelacional_train_all_multia\303\261os_full_edim.bat"
+A	correr_entrenamientos.bat
+A	correr_final.bat
+A	"correr_sinearlystopping_multirelacional_multiplesa\303\261os_multiplesdim.bat"
+M	load_data.py
+A	main_NN.py
+A	main_early_stopping.py
+A	main_guardado.py
+A	main_original.py
+A	main_original_warm_start.py
+A	main_original_warm_start_gemini.py
+A	main_original_warm_start_gemini_2.py
+A	main_original_warm_start_gemini_2_earlystopping_gemini.py
+A	main_original_warm_start_gemini_2_earlystopping_gemini_definitivo.py
+A	main_original_warm_start_gemini_2_earlystopping_gemini_definitivo2.py
+A	main_original_warm_start_gemini_2_earlystopping_gemini_softmax.py
+M	model.py
+A	model_NN.py
+A	model_soft.py
+A	probar_modelo.py
+
+Resumen de cambios (numstat):
+34	0	.gitignore
+211	0	analyze_distributions.py
+29	0	correr.bat
+47	0	correr_earlystopping.bat
+30	0	correr_earlystopping_multirelacional.bat
+30	0	"correr_earlystopping_multirelacional_multiplesa\303\261os.bat"
+51	0	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim copy.bat"
+51	0	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim.bat"
+51	0	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim_2.bat"
+49	0	"correr_earlystopping_multirelacional_multiplesa\303\261os_multiplesdim_soft.bat"
+50	0	"correr_earlystopping_multirelacional_train_all_multia\303\261os.bat"
+73	0	"correr_earlystopping_multirelacional_train_all_multia\303\261os_full_edim.bat"
+30	0	correr_entrenamientos.bat
+54	0	correr_final.bat
+45	0	"correr_sinearlystopping_multirelacional_multiplesa\303\261os_multiplesdim.bat"
+16	6	load_data.py
+295	0	main_NN.py
+204	0	main_early_stopping.py
+279	0	main_guardado.py
+202	0	main_original.py
+204	0	main_original_warm_start.py
+206	0	main_original_warm_start_gemini.py
+234	0	main_original_warm_start_gemini_2.py
+253	0	main_original_warm_start_gemini_2_earlystopping_gemini.py
+343	0	main_original_warm_start_gemini_2_earlystopping_gemini_definitivo.py
+385	0	main_original_warm_start_gemini_2_earlystopping_gemini_definitivo2.py
+257	0	main_original_warm_start_gemini_2_earlystopping_gemini_softmax.py
+1	1	model.py
+107	0	model_NN.py
+73	0	model_soft.py
+85	0	probar_modelo.py
