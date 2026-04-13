@@ -1,0 +1,418 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+
+
+DEFAULT_HISTORY_FILES = [
+    "df_20191.csv",
+    "df_20192.csv",
+    "df_20201.csv",
+    "df_20202.csv",
+    "df_20211.csv",
+    "df_20212.csv",
+    "df_20220.csv",
+    "df_20221.csv",
+    "df_20222.csv",
+    "df_20223.csv",
+]
+DEFAULT_CURSOS_S1 = ["MA1101", "MA1001", "FI1000", "BT1211"]
+DEFAULT_CURSOS_S2 = ["CC1002", "MA1002", "MA1102", "FI1100"]
+DEFAULT_CURSOS_S3 = ["MA2001", "MA2601", "FI2001", "FI2003", "IQ2211"]
+FAIL_GRADE = 1.0
+APPROVED_TRANSFER_GRADE = 4.0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Entrena XGBoost para predecir reprobación en cursos de tercer semestre usando historial de S1 y S2."
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "data" / "dataframes_por_semestre",
+        help="Directorio donde viven los archivos df_*.csv.",
+    )
+    parser.add_argument("--history-files", nargs="+", default=DEFAULT_HISTORY_FILES)
+    parser.add_argument("--courses-s1", nargs="+", default=DEFAULT_CURSOS_S1)
+    parser.add_argument("--courses-s2", nargs="+", default=DEFAULT_CURSOS_S2)
+    parser.add_argument("--courses-s3", nargs="+", default=DEFAULT_CURSOS_S3)
+    parser.add_argument("--test-size", type=float, default=0.2)
+    parser.add_argument("--validation-size", type=float, default=0.25)
+    parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument("--n-estimators", type=int, default=150)
+    parser.add_argument("--max-depth", type=int, default=4)
+    parser.add_argument("--learning-rate", type=float, default=0.05)
+    parser.add_argument("--min-samples", type=int, default=30)
+    parser.add_argument(
+        "--save-report",
+        type=Path,
+        default=Path("results") / "gemini_tree_tercer_semestre.csv",
+        help="Ruta donde guardar el resumen CSV de métricas.",
+    )
+    parser.add_argument(
+        "--save-fp-report",
+        type=Path,
+        default=Path("results") / "falsos_positivos_tercer_semestre.csv",
+        help="Ruta donde guardar el informe de falsos positivos.",
+    )
+    return parser.parse_args()
+
+
+def load_history(data_dir: Path, file_names: list[str]) -> pd.DataFrame:
+    missing_files = [file_name for file_name in file_names if not (data_dir / file_name).exists()]
+    if missing_files:
+        missing_str = ", ".join(missing_files)
+        raise FileNotFoundError(f"No se encontraron estos archivos en {data_dir}: {missing_str}")
+
+    frames = [pd.read_csv(data_dir / file_name, sep=";", encoding="utf-8") for file_name in file_names]
+    return pd.concat(frames, ignore_index=True)
+
+
+def limpiar_datos(df: pd.DataFrame) -> pd.DataFrame:
+    cleaned = df.copy()
+    cleaned["ESTADO_CURSO"] = cleaned["ESTADO_CURSO"].astype(str).str.strip()
+    cleaned = cleaned[cleaned["ESTADO_CURSO"].str.contains("Aprobado|Reprobado", na=False)].copy()
+
+    cleaned["NOTA"] = pd.to_numeric(
+        cleaned["NOTA"].astype(str).str.replace(",", ".", regex=False),
+        errors="coerce",
+    )
+
+    missing_grade_mask = cleaned["NOTA"].isna()
+    aprobado_t_mask = missing_grade_mask & cleaned["ESTADO_CURSO"].str.contains(r"Aprobado \(T\)", na=False)
+    missing_mask = missing_grade_mask & ~aprobado_t_mask
+    cleaned.loc[aprobado_t_mask, "NOTA"] = APPROVED_TRANSFER_GRADE
+    cleaned.loc[missing_mask, "NOTA"] = FAIL_GRADE
+    cleaned["NOTA_FALTANTE"] = missing_mask.astype(int)
+    return cleaned
+
+
+def build_feature_matrix(df_historico: pd.DataFrame, courses_s1: list[str], courses_s2: list[str]) -> pd.DataFrame:
+    feature_courses = courses_s1 + courses_s2
+    feature_rows = df_historico[df_historico["CURSO"].isin(feature_courses)].copy()
+
+    df_features = feature_rows.pivot_table(
+        index="ID",
+        columns="CURSO",
+        values="NOTA",
+        aggfunc="max",
+    ).reset_index()
+
+    df_missing = feature_rows.pivot_table(
+        index="ID",
+        columns="CURSO",
+        values="NOTA_FALTANTE",
+        aggfunc="max",
+    ).reset_index()
+
+    for curso in feature_courses:
+        if curso not in df_features.columns:
+            df_features[curso] = np.nan
+        if curso not in df_missing.columns:
+            df_missing[curso] = np.nan
+
+    df_features[feature_courses] = df_features[feature_courses].fillna(FAIL_GRADE)
+    rename_map = {curso: f"{curso}_faltante" for curso in feature_courses}
+    df_missing = df_missing.rename(columns=rename_map)
+    missing_columns = list(rename_map.values())
+    df_missing[missing_columns] = df_missing[missing_columns].fillna(1).astype(int)
+
+    return df_features[["ID"] + feature_courses].merge(
+        df_missing[["ID"] + missing_columns],
+        on="ID",
+        how="left",
+    )
+
+
+def build_target(df_historico: pd.DataFrame, curso_target: str) -> pd.DataFrame:
+    df_target = df_historico[df_historico["CURSO"] == curso_target].copy()
+    df_target = df_target.sort_values("SEMESTRE").groupby("ID").first().reset_index()
+    df_target["TARGET"] = np.where(df_target["ESTADO_CURSO"].str.contains("Reprobado", na=False), 1, 0)
+    return df_target[["ID", "TARGET"]]
+
+
+def choose_threshold(y_true: pd.Series, probabilities: np.ndarray) -> tuple[float, float]:
+    best_threshold = 0.5
+    best_score = -1.0
+    for threshold in np.linspace(0.05, 0.95, 19):
+        predictions = (probabilities >= threshold).astype(int)
+        score = f1_score(y_true, predictions, zero_division=0)
+        if score > best_score:
+            best_score = score
+            best_threshold = float(threshold)
+    return best_threshold, best_score
+
+
+def analyze_false_positives(
+    fp_ids: list[str],
+    df_historico: pd.DataFrame,
+    courses_s1: list[str],
+    courses_s2: list[str],
+    curso_target: str,
+    probabilities_map: dict[str, float],
+) -> pd.DataFrame:
+    """Para cada alumno FP, extrae su historial en S1, S2 y el curso S3 objetivo."""
+    all_relevant_courses = courses_s1 + courses_s2
+    records = []
+    for alumno_id in fp_ids:
+        hist = df_historico[df_historico["ID"] == alumno_id]
+        row: dict[str, object] = {
+            "ID": alumno_id,
+            "curso_objetivo_s3": curso_target,
+            "prob_reprobacion": probabilities_map.get(alumno_id, np.nan),
+        }
+
+        # Notas S1
+        for curso in courses_s1:
+            datos_curso = hist[hist["CURSO"] == curso]
+            if len(datos_curso) > 0:
+                nota = datos_curso.iloc[0]["NOTA"]
+                estado = datos_curso.iloc[0]["ESTADO_CURSO"]
+                row[f"{curso}_nota"] = nota
+                row[f"{curso}_estado"] = estado
+            else:
+                row[f"{curso}_nota"] = np.nan
+                row[f"{curso}_estado"] = "Sin registro"
+
+        # Notas S2
+        for curso in courses_s2:
+            datos_curso = hist[hist["CURSO"] == curso]
+            if len(datos_curso) > 0:
+                nota = datos_curso.iloc[0]["NOTA"]
+                estado = datos_curso.iloc[0]["ESTADO_CURSO"]
+                row[f"{curso}_nota"] = nota
+                row[f"{curso}_estado"] = estado
+            else:
+                row[f"{curso}_nota"] = np.nan
+                row[f"{curso}_estado"] = "Sin registro"
+
+        # Resultado real en S3
+        datos_s3 = hist[hist["CURSO"] == curso_target]
+        if len(datos_s3) > 0:
+            row["nota_real_s3"] = datos_s3.iloc[0]["NOTA"]
+            row["estado_real_s3"] = datos_s3.iloc[0]["ESTADO_CURSO"]
+        else:
+            row["nota_real_s3"] = np.nan
+            row["estado_real_s3"] = "Sin registro"
+
+        # Métricas resumen de vulnerabilidad
+        notas_s1 = [row.get(f"{c}_nota") for c in courses_s1 if pd.notna(row.get(f"{c}_nota"))]
+        notas_s2 = [row.get(f"{c}_nota") for c in courses_s2 if pd.notna(row.get(f"{c}_nota"))]
+        notas_all = [n for n in notas_s1 + notas_s2 if isinstance(n, (int, float))]
+
+        row["promedio_s1"] = np.mean(notas_s1) if notas_s1 else np.nan
+        row["promedio_s2"] = np.mean(notas_s2) if notas_s2 else np.nan
+        row["promedio_general"] = np.mean(notas_all) if notas_all else np.nan
+
+        reprobados_previos = sum(
+            1 for c in all_relevant_courses
+            if row.get(f"{c}_estado") and "Reprobado" in str(row.get(f"{c}_estado", ""))
+        )
+        sin_registro = sum(
+            1 for c in all_relevant_courses
+            if row.get(f"{c}_estado") == "Sin registro"
+        )
+        row["cursos_reprobados_previos"] = reprobados_previos
+        row["cursos_sin_registro"] = sin_registro
+        row["vulnerable"] = "Sí" if (reprobados_previos >= 2 or (notas_all and np.mean(notas_all) < 4.5)) else "No"
+
+        records.append(row)
+
+    return pd.DataFrame(records)
+
+
+def train_for_target(
+    args: argparse.Namespace,
+    df_features: pd.DataFrame,
+    df_historico: pd.DataFrame,
+    curso_target: str,
+) -> tuple[dict[str, object] | None, pd.DataFrame]:
+    """Entrena, elige threshold, evalúa y retorna métricas + DataFrame de FP."""
+    df_target = build_target(df_historico, curso_target)
+    df_model = pd.merge(df_features, df_target, on="ID", how="inner")
+
+    if len(df_model) < args.min_samples:
+        print(f"Muestra insuficiente para {curso_target}: {len(df_model)} alumnos. Saltando...\n")
+        return None, pd.DataFrame()
+
+    feature_columns = [c for c in df_model.columns if c not in ("ID", "TARGET")]
+    X = df_model[feature_columns]
+    y = df_model["TARGET"]
+    ids = df_model["ID"].values
+
+    if y.nunique() < 2:
+        print(f"No hay suficientes casos de ambas clases para {curso_target}. Saltando...\n")
+        return None, pd.DataFrame()
+
+    X_train_full, X_test, y_train_full, y_test, _, ids_test = train_test_split(
+        X, y, ids,
+        test_size=args.test_size,
+        random_state=args.random_state,
+        stratify=y,
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full, y_train_full,
+        test_size=args.validation_size,
+        random_state=args.random_state,
+        stratify=y_train_full,
+    )
+
+    positives = int(y_train.sum())
+    negatives = int((y_train == 0).sum())
+    scale_pos_weight = negatives / positives if positives else 1.0
+
+    model = XGBClassifier(
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        learning_rate=args.learning_rate,
+        scale_pos_weight=scale_pos_weight,
+        random_state=args.random_state,
+        eval_metric="logloss",
+        tree_method="hist",
+        n_jobs=1,
+    )
+    model.fit(X_train, y_train)
+
+    # --- Threshold tuning en validación ---
+    val_proba = model.predict_proba(X_val)[:, 1]
+    best_threshold, val_f1 = choose_threshold(y_val, val_proba)
+
+    # --- Evaluación en test ---
+    test_proba = model.predict_proba(X_test)[:, 1]
+    y_pred = (test_proba >= best_threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred, labels=[0, 1]).ravel()
+
+    print("=" * 70)
+    print(f"CURSO OBJETIVO: {curso_target}")
+    print("=" * 70)
+    print(f"Alumnos que lograron llegar a {curso_target}: {len(df_model)}")
+    print(f"Reprobados en {curso_target}: {int(y.sum())} ({(y.sum() / len(y)):.1%})")
+    print(f"Train: {len(X_train)} | Validación: {len(X_val)} | Test: {len(X_test)}")
+    print(f"Threshold óptimo (f1 en validación): {best_threshold:.2f} | F1 val: {val_f1:.4f}")
+    print(f"Confusión test -> TN={tn}  FP={fp}  FN={fn}  TP={tp}")
+    print(
+        classification_report(
+            y_test,
+            y_pred,
+            target_names=["Aprueba", "Reprueba"],
+            zero_division=0,
+        )
+    )
+
+    # --- Identificar FP (predijo Reprueba, pero Aprobó) ---
+    fp_mask = (y_pred == 1) & (y_test.values == 0)
+    fp_ids = list(ids_test[fp_mask])
+    fp_probas = {aid: float(p) for aid, p in zip(ids_test[fp_mask], test_proba[fp_mask])}
+    print(f"Falsos positivos en test: {len(fp_ids)} alumnos\n")
+
+    fp_df = analyze_false_positives(
+        fp_ids, df_historico, args.courses_s1, args.courses_s2, curso_target, fp_probas,
+    )
+
+    metrics = {
+        "curso_objetivo": curso_target,
+        "muestra": len(df_model),
+        "reprobados": int(y.sum()),
+        "threshold": best_threshold,
+        "val_f1": val_f1,
+        "precision_reprueba": precision_score(y_test, y_pred, zero_division=0),
+        "recall_reprueba": recall_score(y_test, y_pred, zero_division=0),
+        "f1_reprueba": f1_score(y_test, y_pred, zero_division=0),
+        "roc_auc": roc_auc_score(y_test, test_proba),
+        "balanced_accuracy": balanced_accuracy_score(y_test, y_pred),
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
+        "n_falsos_positivos": len(fp_ids),
+    }
+
+    return metrics, fp_df
+
+
+def main() -> None:
+    args = parse_args()
+    data_dir = args.data_dir.resolve()
+    print(f"Usando data_dir: {data_dir}")
+    print(f"Archivos históricos: {', '.join(args.history_files)}")
+    print(f"Cursos S1: {', '.join(args.courses_s1)}")
+    print(f"Cursos S2: {', '.join(args.courses_s2)}")
+    print(f"Cursos S3 objetivo: {', '.join(args.courses_s3)}")
+    print(
+        f"Regla activa: Aprobado (T) sin nota => {APPROVED_TRANSFER_GRADE}; "
+        f"resto de notas faltantes => {FAIL_GRADE}\n"
+    )
+
+    df_historico = limpiar_datos(load_history(data_dir, args.history_files))
+    df_features = build_feature_matrix(df_historico, args.courses_s1, args.courses_s2)
+
+    results: list[dict[str, object]] = []
+    all_fp_frames: list[pd.DataFrame] = []
+
+    for curso_target in args.courses_s3:
+        metrics, fp_df = train_for_target(args, df_features, df_historico, curso_target)
+        if metrics is not None:
+            results.append(metrics)
+        if not fp_df.empty:
+            all_fp_frames.append(fp_df)
+
+    if not results:
+        print("No se pudo entrenar ningún modelo con los parámetros seleccionados.")
+        return
+
+    results_df = pd.DataFrame(results)
+    print("=" * 70)
+    print("RESUMEN MÉTRICAS")
+    print("=" * 70)
+    print(results_df.to_string(index=False))
+
+    save_path = args.save_report.resolve()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    results_df.to_csv(save_path, index=False)
+    print(f"\nMétricas guardadas en: {save_path}")
+
+    # --- Informe de falsos positivos ---
+    if all_fp_frames:
+        fp_all = pd.concat(all_fp_frames, ignore_index=True)
+        fp_path = args.save_fp_report.resolve()
+        fp_path.parent.mkdir(parents=True, exist_ok=True)
+        fp_all.to_csv(fp_path, index=False)
+        print(f"Informe FP guardado en: {fp_path}")
+
+        # Resumen de vulnerabilidad
+        print("\n" + "=" * 70)
+        print("RESUMEN FALSOS POSITIVOS (por curso)")
+        print("=" * 70)
+        for curso in fp_all["curso_objetivo_s3"].unique():
+            sub = fp_all[fp_all["curso_objetivo_s3"] == curso]
+            n_total = len(sub)
+            n_vuln = (sub["vulnerable"] == "Sí").sum()
+            avg_prob = sub["prob_reprobacion"].mean()
+            avg_nota_s3 = sub["nota_real_s3"].mean()
+            avg_reprob_prev = sub["cursos_reprobados_previos"].mean()
+            avg_prom = sub["promedio_general"].mean()
+            print(f"\n  {curso}: {n_total} falsos positivos")
+            print(f"    Vulnerables: {n_vuln}/{n_total} ({(n_vuln / n_total * 100):.0f}%)")
+            print(f"    Prob. reprobación promedio del modelo: {avg_prob:.2f}")
+            print(f"    Nota real promedio en {curso}: {avg_nota_s3:.2f}")
+            print(f"    Cursos previos reprobados (prom): {avg_reprob_prev:.1f}")
+            print(f"    Promedio general S1+S2: {avg_prom:.2f}")
+
+
+if __name__ == "__main__":
+    main()
