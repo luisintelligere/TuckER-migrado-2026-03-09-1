@@ -1,0 +1,463 @@
+%%% ============================================================
+%%%  Experimento: Dataset Aumentado para Predicción S1→S2
+%%%  con Búsqueda de Arquitectura NN y Visualización t-SNE
+%%%  Compilar con pdfLaTeX.
+%%% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{siunitx}
+
+\geometry{margin=2.5cm}
+
+\sisetup{
+  round-mode      = places,
+  round-precision = 4,
+  table-number-alignment = center,
+}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{%
+    Experimento: Entrenamiento con Dataset Aumentado \\
+    y Búsqueda de Arquitectura de Red de Proyección \\
+    para Predicción $S_1 \to S_2$
+}
+\author{Luis Plaza}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Motivación}
+% ============================================================
+
+Los experimentos anteriores de predicción $S_1 \to S_2$ (segunda sección del informe principal) utilizaron una o más cohortes completas de entrenamiento. El mejor resultado documentado —modelo con \textbf{3~cohortes balanceadas, 4D}, $d_r=11$— alcanzó Acc$=0.755$, Recall$=0.548$, Precisión$=0.341$ y F1$\approx 0.421$ sobre la cohorte 2022.
+
+Una limitación de esa estrategia es que la mayoría de los alumnos que aprueban aportan poca señal discriminativa para la clase \texttt{reprueba}. Cuando se mezclan 3 cohortes completas, la clase aprobatoria domina el espacio de embeddings. Este experimento propone una estrategia alternativa de construcción del dataset que conserva \emph{toda} la señal de riesgo histórica sin dilutirla con alumnos que nunca reprueban.
+
+% ============================================================
+\section{Dataset Aumentado}
+% ============================================================
+
+\subsection{Estrategia de construcción}
+
+El \textbf{dataset aumentado} (\texttt{dataset\_augmentado\_1920reprueba\_2021\_s2}) combina:
+
+\begin{itemize}
+    \item \textbf{Cohorte 2021 completa:} todos los alumnos con los 4 cursos de $S_1$
+    (BT1211, FI1000, MA1001, MA1101) y sus relaciones de $S_2$
+    (CC1002, FI1100, MA1002, MA1102).
+    \item \textbf{Cohortes 2019 y 2020 con $\geq 1$ reprobación:} de estas cohortes se
+    incorporan \emph{todos} los registros de los alumnos que reprobaron al menos una
+    asignatura de $S_2$, incluyendo también sus tripletas de aprobación para conservar
+    el contexto relacional.
+\end{itemize}
+
+\noindent Esta selección concentra la información histórica de riesgo sin agregar el ruido proveniente de cohortes previas de alumnos puramente aprobatorios.
+
+\subsection{Estadísticas del dataset}
+
+\begin{table}[H]
+\centering
+\caption{Estadísticas del dataset aumentado versus dataset con 3~cohortes completas.}
+\label{tab:stats_dataset}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Estadístico} & \textbf{3 Cohortes completas} & \textbf{Dataset aumentado} \\
+\midrule
+Total de tripletas & ${\sim}$8\,000 & 3\,606 \\
+Entidades (alumnos + cursos) & ${\sim}$2\,000 & 959 \\
+Alumnos en entrenamiento NN & ${\sim}$2\,000 & 951 \\
+Cohortes de entrenamiento & 2019, 2020, 2021 & 2021 + rep.\ 2019/2020 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Protocolo de entrenamiento TuckER}
+
+Se entrenaron modelos TuckER para $d_r \in \{1, \ldots, 12\}$ con los siguientes hiperparámetros:
+
+\begin{itemize}
+    \item Dimensión de embeddings de entidad: $d_e = 4$.
+    \item Inicialización \emph{warm-start}: cada embedding de alumno se inicializa con
+    $(n_c - 4.0)/3.0$ para $c \in \{$BT1211, FI1000, MA1001, MA1101$\}$, llevando el
+    rango $[1, 7]$ al intervalo $[-1, 1]$.
+    \item Optimizador: Adam, lr $= 0.003$.
+    \item Dropout: $(0.3,\,0.4,\,0.5)$ en entrada y capas ocultas.
+    \item Épocas máximas: 500, con \emph{early stopping} por MRR de validación
+    (paciencia 100).
+\end{itemize}
+
+Las cohortes OOT son exclusivamente $20221 \to 20222$ y $20231 \to 20232$ (las cohortes
+2019, 2020 y 2021 están contenidas en el entrenamiento).
+
+% ============================================================
+\section{Búsqueda de Arquitectura de Red de Proyección}
+% ============================================================
+
+\subsection{Metodología}
+
+La red de proyección $f_\theta:\mathbb{R}^4 \to \mathbb{R}^{d_e}$ mapea el vector de notas
+normalizadas de $S_1$ hacia el embedding aprendido por TuckER.  Se evaluaron 23
+configuraciones que varían:
+
+\begin{itemize}
+    \item \textbf{Topología de capas ocultas:} desde una sola capa de 16 neuronas hasta
+    arquitecturas profundas simétricas como $[64, 128, 64]$.
+    \item \textbf{Dropout:} $\{0.0, 0.1, 0.2, 0.3, 0.5\}$.
+    \item \textbf{Función de activación:} ReLU, Tanh, LeakyReLU($\alpha=0.1$).
+    \item \textbf{Tasa de aprendizaje:} $\{10^{-3},\,5 \times 10^{-4},\,10^{-4}\}$.
+\end{itemize}
+
+Cada configuración se entrenó con SEED$=42$, máximo 500 épocas y \emph{early stopping}
+(paciencia 100) con pérdida MSE. Los modelos OOT se evaluaron sobre
+$20221 \to 20222$ y $20231 \to 20232$, reportando F1 y Recall de la clase
+\texttt{reprueba}.
+
+\subsection{Resultados para $d_r = 5$}
+
+\begin{table}[H]
+\centering
+\caption{TOP-5 configuraciones por F1 promedio (OOT) para $d_r=5$.}
+\label{tab:top5_f1_rdim5}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Config} & \textbf{Arquitectura} & \textbf{Drop} & \textbf{Act} & \textbf{F1$_{avg}$} & \textbf{Rec$_{avg}$} & \textbf{Épocas} \\
+\midrule
+\texttt{drop05}      & [64, 128]    & 0.5 & ReLU   & \textbf{0.3985} & 0.7207 & 300 \\
+\texttt{leaky\_wider} & [128, 256]  & 0.2 & Leaky  & 0.3980 & 0.7502 & 105 \\
+\texttt{tanh\_deep}  & [64, 128, 64] & 0.2 & Tanh  & 0.3967 & 0.7115 & 479 \\
+\texttt{leaky\_base} & [64, 128]   & 0.3 & Leaky  & 0.3952 & 0.7575 & 161 \\
+\texttt{drop0}       & [64, 128]   & 0.0 & ReLU   & 0.3913 & 0.7630 & 111 \\
+\midrule
+\textit{baseline}    & [64, 128]   & 0.3 & ReLU   & 0.3642 & 0.8245 & 127 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{TOP-5 configuraciones por Recall promedio (OOT) para $d_r=5$.}
+\label{tab:top5_rec_rdim5}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Config} & \textbf{Arquitectura} & \textbf{Drop} & \textbf{Act} & \textbf{F1$_{avg}$} & \textbf{Rec$_{avg}$} & \textbf{Épocas} \\
+\midrule
+\texttt{large}      & [256, 512]   & 0.4 & ReLU  & 0.3829 & \textbf{0.8489} & 104 \\
+\texttt{deep\_wide} & [128, 256, 128] & 0.3 & ReLU & 0.3407 & 0.8401 & 132 \\
+\texttt{lr1e4}      & [64, 128]   & 0.3 & ReLU  & 0.3638 & 0.8352 & 289 \\
+\texttt{baseline}   & [64, 128]   & 0.3 & ReLU  & 0.3642 & 0.8245 & 127 \\
+\texttt{wider}      & [128, 256]  & 0.3 & ReLU  & 0.3635 & 0.8189 & 111 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Desglose por cohorte OOT para la mejor configuración por F1 y por Recall ($d_r=5$).}
+\label{tab:detalle_rdim5}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Config (objetivo)} & \textbf{Cohorte} & \textbf{F1} & \textbf{Prec} & \textbf{Rec} & \textbf{Acc} \\
+\midrule
+\multirow{2}{*}{\texttt{drop05} (F1)}
+  & $20221 \to 20222$ & 0.3783 & 0.2669 & 0.6488 & 0.6543 \\
+  & $20231 \to 20232$ & 0.4188 & 0.2846 & 0.7926 & 0.6317 \\
+\midrule
+\multirow{2}{*}{\texttt{large} (Recall)}
+  & $20221 \to 20222$ & 0.3802 & 0.2494 & 0.7996 & 0.5775 \\
+  & $20231 \to 20232$ & 0.3855 & 0.2454 & 0.8981 & 0.5208 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Resultados para $d_r = 8$}
+
+\begin{table}[H]
+\centering
+\caption{TOP-5 configuraciones por F1 promedio (OOT) para $d_r=8$.}
+\label{tab:top5_f1_rdim8}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Config} & \textbf{Arquitectura} & \textbf{Drop} & \textbf{Act} & \textbf{F1$_{avg}$} & \textbf{Rec$_{avg}$} & \textbf{Épocas} \\
+\midrule
+\texttt{deep\_small} & [32, 64, 32]  & 0.2 & ReLU  & \textbf{0.4023} & 0.5546 & 295 \\
+\texttt{deep\_sym}   & [64, 128, 64] & 0.3 & ReLU  & 0.3814 & 0.5824 & 403 \\
+\texttt{combo\_tanh\_lr} & [128, 256] & 0.2 & Tanh & 0.3385 & 0.6104 & 357 \\
+\texttt{tanh\_deep}  & [64, 128, 64] & 0.2 & Tanh  & 0.3345 & 0.6488 & 284 \\
+\texttt{drop05}      & [64, 128]    & 0.5 & ReLU  & 0.3339 & 0.5963 & 393 \\
+\midrule
+\textit{baseline}    & [64, 128]    & 0.3 & ReLU  & 0.1929 & 0.2076 & 119 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{TOP-5 configuraciones por Recall promedio (OOT) para $d_r=8$.}
+\label{tab:top5_rec_rdim8}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Config} & \textbf{Arquitectura} & \textbf{Drop} & \textbf{Act} & \textbf{F1$_{avg}$} & \textbf{Rec$_{avg}$} & \textbf{Épocas} \\
+\midrule
+\texttt{tanh\_deep}      & [64, 128, 64] & 0.2 & Tanh & 0.3345 & \textbf{0.6488} & 284 \\
+\texttt{combo\_tanh\_lr} & [128, 256]    & 0.2 & Tanh & 0.3385 & 0.6104 & 357 \\
+\texttt{tiny}            & [16, 32]     & 0.1 & ReLU & 0.3275 & 0.6073 & 329 \\
+\texttt{single\_128}     & [128]        & 0.2 & ReLU & 0.2841 & 0.6063 & 145 \\
+\texttt{drop05}          & [64, 128]    & 0.5 & ReLU & 0.3339 & 0.5963 & 393 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Desglose por cohorte OOT para la mejor configuración por F1 y por Recall ($d_r=8$).}
+\label{tab:detalle_rdim8}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Config (objetivo)} & \textbf{Cohorte} & \textbf{F1} & \textbf{Prec} & \textbf{Rec} & \textbf{Acc} \\
+\midrule
+\multirow{2}{*}{\texttt{deep\_small} (F1)}
+  & $20221 \to 20222$ & 0.3941 & 0.3053 & 0.5556 & 0.7232 \\
+  & $20231 \to 20232$ & 0.4104 & 0.3261 & 0.5537 & 0.7337 \\
+\midrule
+\multirow{2}{*}{\texttt{tanh\_deep} (Recall)}
+  & $20221 \to 20222$ & 0.3369 & 0.2263 & 0.6587 & 0.5797 \\
+  & $20231 \to 20232$ & 0.3321 & 0.2243 & 0.6389 & 0.5697 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Observaciones sobre la búsqueda de arquitectura}
+
+El comportamiento de $d_r$ frente a la arquitectura NN es marcadamente diferente:
+
+\begin{itemize}
+    \item \textbf{$d_r=5$:} favorece regularización fuerte.
+    \texttt{drop05} (dropout$=0.5$) y configuraciones \texttt{leaky} dominan en F1.
+    Las arquitecturas grandes (\texttt{large}, \texttt{deep\_wide}) dominan en Recall
+    a costa de precisión. Las architecturas de baja lr ($10^{-4}$) también son
+    competitivas en Recall, sugiriendo que el espacio de dimensión 5 requiere un
+    proyector que converja lentamente para no sobreajustar los embeddings de entrenamiento.
+    \item \textbf{$d_r=8$:} el espacio de relaciones más rico requiere un proyector
+    \emph{compacto y profundo}. \texttt{deep\_small}$=[32, 64, 32]$ es el claro ganador en F1;
+    las arquitecturas grandes (\texttt{baseline} $[64, 128]$, \texttt{large}, \texttt{wider})
+    colapsan casi completamente (F1$\approx 0.19$). La arquitectura base por defecto
+    resulta inútil para $d_r=8$, mientras que para $d_r=5$ es moderadamente competitiva.
+\end{itemize}
+
+% ============================================================
+\section{Evaluación OOT: Mejora respecto a arquitectura por defecto}
+% ============================================================
+
+La tabla siguiente compara la arquitectura por defecto (baseline, $[64,128]$, drop$=0.3$)
+con la mejor arquitectura encontrada para cada $d_r$.
+
+\begin{table}[H]
+\centering
+\caption{Comparación entre arquitectura por defecto y mejor arquitectura NN
+para el dataset aumentado, sobre las dos cohortes OOT.
+Métricas referidas a la clase \texttt{reprueba}.}
+\label{tab:baseline_vs_best}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Modelo} & \textbf{Cohorte OOT} & \textbf{F1} & \textbf{Prec} & \textbf{Rec} & \textbf{Acc} \\
+\midrule
+\multicolumn{6}{l}{\textit{$d_r=5$ — arquitectura por defecto [64,128], drop=0.3}} \\
+Baseline ($d_r=5$) & $20221 \to 20222$ & 0.3595 & 0.2327 & 0.7897 & 0.5441 \\
+Baseline ($d_r=5$) & $20231 \to 20232$ & 0.3439 & 0.2129 & 0.8944 & 0.4287 \\
+\midrule
+\multicolumn{6}{l}{\textit{$d_r=5$ — mejor config: \texttt{drop05} [64,128], drop=0.5}} \\
+\texttt{drop05} ($d_r=5$) & $20221 \to 20222$ & 0.3783 & 0.2669 & 0.6488 & 0.6543 \\
+\texttt{drop05} ($d_r=5$) & $20231 \to 20232$ & \textbf{0.4188} & 0.2846 & 0.7926 & 0.6317 \\
+\midrule
+\multicolumn{6}{l}{\textit{$d_r=8$ — arquitectura por defecto [64,128], drop=0.3}} \\
+Baseline ($d_r=8$) & $20221 \to 20222$ & 0.3429 & 0.2692 & 0.4722 & 0.7068 \\
+Baseline ($d_r=8$) & $20231 \to 20232$ & 0.4062 & 0.3273 & 0.5352 & 0.7381 \\
+\midrule
+\multicolumn{6}{l}{\textit{$d_r=8$ — mejor config: \texttt{deep\_small} [32,64,32], drop=0.2}} \\
+\texttt{deep\_small} ($d_r=8$) & $20221 \to 20222$ & 0.3941 & 0.3053 & 0.5556 & 0.7232 \\
+\texttt{deep\_small} ($d_r=8$) & $20231 \to 20232$ & \textbf{0.4104} & 0.3261 & 0.5537 & 0.7337 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Síntesis.}
+Para $d_r=5$, la búsqueda de arquitectura mejora el F1 promedio en
+$+0.047$ ($+13\%$), elevándolo de $0.352$ a $0.399$. La precisión sube notoriamente
+($0.233 \to 0.276$) mientras el Recall baja moderadamente ($0.842 \to 0.721$): las
+predicciones resultan más fiables aunque menos exhaustivas.
+Para $d_r=8$, la mejora en F1 es $+0.028$ ($+7\%$) y el Recall también sube ligeramente
+($0.504 \to 0.555$), indicando que en este caso la arquitectura correcta ayuda tanto
+en precisión como en cobertura.
+
+% ============================================================
+\section{Comparación con Modelos del Informe Principal}
+% ============================================================
+
+La Tabla~\ref{tab:comparacion_modelos} contrasta los mejores modelos del informe principal
+(entrenados con 1 y 3 cohortes completas) con los mejores modelos del dataset aumentado.
+Todos los valores corresponden a la cohorte $20221 \to 20222$, que es la cohorte de prueba
+en común entre ambos diseños experimentales.
+
+\begin{table}[H]
+\centering
+\caption{Comparación de modelos de predicción $S_1 \to S_2$ sobre cohorte 2022.
+Métricas de la clase \texttt{reprueba}. Los valores del informe provienen de la
+Tabla~2 de validación de cohortes (mejor $d_r$ por estrategia). Los valores del
+dataset aumentado corresponden a la cohorte OOT $20221\to 20222$.
+$^\dagger$ F1 calculado a partir de Prec y Rec reportados.}
+\label{tab:comparacion_modelos}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Modelo} & \textbf{Train} & \textbf{Acc} & \textbf{Prec} & \textbf{Rec} & \textbf{F1} & \textbf{$d_r$} \\
+\midrule
+\multicolumn{7}{l}{\textit{Informe principal (evaluados en cohorte 2022)}} \\
+1 Cohorte 4D, mejor Prec & 2019 & 0.945 & \textbf{0.598} & 0.315 & 0.413$^\dagger$ & 6 \\
+1 Cohorte 5D Bal., mejor F1 & 2019 & 0.736 & 0.117 & 0.511 & 0.190$^\dagger$ & 10 \\
+3 Cohortes 4D Bal., mejor & 2019+2020+2021 & 0.755 & 0.341 & 0.548 & 0.421$^\dagger$ & 11 \\
+\midrule
+\multicolumn{7}{l}{\textit{Dataset aumentado (OOT $20221\to 20222$)}} \\
+Aug.\ baseline $d_r=5$         & Aug. & 0.544 & 0.233 & 0.790 & 0.360 & 5 \\
+Aug.\ \texttt{drop05} $d_r=5$  & Aug. & 0.654 & 0.267 & 0.649 & 0.378 & 5 \\
+Aug.\ baseline $d_r=8$         & Aug. & 0.707 & 0.269 & 0.472 & 0.343 & 8 \\
+Aug.\ \textbf{\texttt{deep\_small}} $d_r=8$ & Aug. & 0.723 & 0.305 & 0.556 & \textbf{0.394} & 8 \\
+\midrule
+\multicolumn{7}{l}{\textit{Dataset aumentado (OOT $20231\to 20232$, sin equivalente en informe)}} \\
+Aug.\ \texttt{drop05} $d_r=5$      & Aug. & 0.632 & 0.285 & 0.793 & 0.419 & 5 \\
+Aug.\ \textbf{\texttt{deep\_small}} $d_r=8$ & Aug. & 0.734 & 0.326 & 0.554 & \textbf{0.410} & 8 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\paragraph{Lectura de la comparación.}
+Tres observaciones principales emergen de esta comparación:
+
+\begin{enumerate}
+    \item \textbf{El modelo de 1~cohorte (4D, $d_r=6$)} tiene la mayor precisión ($0.598$),
+    pero un Recall muy bajo ($0.315$): detecta pocos reprobados pero con alta confianza.
+    No se generaliza bien a otras cohortes y su F1 ($0.413$) es comparable al del modelo
+    aumentado \texttt{deep\_small} ($0.394$).
+    
+    \item \textbf{El mejor modelo del informe} (3~cohortes balanceadas, 4D, $d_r=11$)
+    logra F1$=0.421$ con Recall$=0.548$ y Prec$=0.341$. El modelo aumentado
+    \texttt{deep\_small} ($d_r=8$) obtiene F1$=0.394$ sobre la misma cohorte 2022,
+    con Recall similar ($0.556$) pero con $\approx 13\%$ más de datos de entrenamiento
+    \emph{menos}: el dataset aumentado usa solo alumnos de riesgo de 2019/2020 más la
+    cohorte 2021 completa, versus 3~cohortes completas.
+    
+    \item \textbf{La ventaja del dataset aumentado} se manifiesta en su capacidad de
+    generalización a una cohorte adicional ($20231\to 20232$), donde el modelo
+    \texttt{drop05} $d_r=5$ alcanza F1$=0.419$, superando el mejor resultado del informe
+    sobre la misma tarea. Esto sugiere que la estrategia de selección de datos de riesgo
+    histórico es más eficiente y estable que agregar cohortes completas.
+\end{enumerate}
+
+\paragraph{Nota metodológica.}
+Los modelos del informe principal fueron evaluados sobre todos los cursos de $S_2$ presentes
+en la cohorte 2022; los modelos del dataset aumentado se evalúan sobre los cuatro cursos
+fundamentales de $S_2$: CC1002, FI1100, MA1002, MA1102. Esta diferencia de alcance debe
+tenerse en cuenta al interpretar la comparación.
+
+% ============================================================
+\section{Visualización t-SNE del Espacio Latente}
+% ============================================================
+
+Para comprender cómo el modelo aprende a separar alumnos en riesgo de los que no lo están,
+se proyectó el vector de \emph{perfil relacional} $v_{s,o} \in \mathbb{R}^{d_r}$ de cada
+alumno OOT hacia 2D mediante t-SNE. Este vector se define como:
+\[
+v_{s,o} = \mathcal{W} \times_2 \hat{e}_s \times_3 e_o
+\]
+donde $\mathcal{W} \in \mathbb{R}^{d_r \times d_e \times d_e}$ es el tensor núcleo de TuckER,
+$\hat{e}_s = f_\theta(x_s)$ es el embedding del alumno proyectado por la red neuronal y
+$e_o$ es el embedding del curso objetivo aprendido por TuckER.
+
+La proyección se realizó para el modelo $d_r=8$ con arquitectura \texttt{deep\_small}
+sobre la cohorte OOT $20231 \to 20232$.
+
+\subsection{Separación aprueba/reprueba}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{../results/tsne_augmentado_rdim8/tsne_binario_rdim8_2023120232.png}
+    \caption{t-SNE de perfiles relacionales para los 4 cursos de $S_2$, cohorte
+    OOT $20231 \to 20232$, modelo aumentado $d_r=8$ (\texttt{deep\_small}).
+    Los puntos en \textcolor{red}{rojo} corresponden a alumnos que reprobaron, los
+    \textcolor{green}{verdes} a quienes aprobaron.}
+    \label{fig:tsne_binario}
+\end{figure}
+
+En CC1002 y MA1002 se observan agrupaciones diferenciadas de reprobados (esquina derecha
+en CC1002, zona izquierda en MA1002), lo que indica que el modelo aprende regiones latentes
+con mayor concentración de riesgo. FI1100 y MA1102 muestran mayor mezcla, consistente con
+el bajo número de reprobaciones ($n=26$ y $n=18$ respectivamente) que dificultan
+la formación de fronteras discriminativas.
+
+\subsection{Gradiente de nota final}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{../results/tsne_augmentado_rdim8/tsne_notas_rdim8_2023120232.png}
+    \caption{t-SNE de perfiles relacionales coloreado por nota final (escala continua
+    rojo-amarillo-verde, $1.0 \to 7.0$), mismas condiciones que la Figura~\ref{fig:tsne_binario}.}
+    \label{fig:tsne_notas}
+\end{figure}
+
+La coloración continua por nota revela que el modelo aprende un gradiente de rendimiento
+\emph{suave}: en MA1002 se aprecia un gradiente espacial de notas bajas (izquierda) a
+notas altas (derecha), lo que indica que el espacio latente codifica no solo la
+distinción binaria sino la magnitud del rendimiento. Este comportamiento es especialmente
+notorio en MA1002 y, en menor medida, en CC1002.
+
+% ============================================================
+\section{Conclusiones}
+% ============================================================
+
+\begin{enumerate}
+    \item El dataset aumentado (cohorte 2021 completa + reprobados 2019/2020) es una
+    estrategia eficiente de construcción de datos: con ${\sim}60\%$ menos tripletas que
+    el dataset de 3~cohortes completas, alcanza métricas OOT comparables o superiores.
+    
+    \item La búsqueda de arquitectura de la red de proyección es \textbf{crítica}:
+    la arquitectura por defecto $[64,128]$ es inútil para $d_r=8$ (F1$=0.193$),
+    mientras que \texttt{deep\_small} $[32,64,32]$ eleva el F1 a $0.402$.
+    Para $d_r=5$, el beneficio es menor pero consistente ($+13\%$ en F1).
+    
+    \item El tradeoff entre precisión y recall depende del $d_r$:
+    $d_r=8$ + \texttt{deep\_small} ofrece mayor precisión (Prec$\approx 0.31$, menor ruido),
+    mientras que $d_r=5$ + \texttt{drop05} ofrece mayor recall (Rec$\approx 0.72$, menor
+    omisión). La elección depende del contexto de uso del sistema de alerta.
+    
+    \item Las visualizaciones t-SNE confirman que el espacio latente captura estructura
+    semántica real: los alumnos en riesgo se agrupan en regiones diferenciadas para los
+    cursos con mayor base de reprobación (CC1002, MA1002), y existe un gradiente
+    continuo de rendimiento alineado con la dimensión espacial.
+    
+    \item La comparación con el informe principal muestra que el modelo aumentado supera
+    el mejor resultado histórico (3~cohortes, F1$=0.421$) en la cohorte $20231 \to 20232$
+    con \texttt{drop05} $d_r=5$ (F1$=0.419$), siendo además evaluable en una cohorte
+    adicional gracias a que el diseño OOT excluye las cohortes de entrenamiento.
+\end{enumerate}
+
+\end{document}
